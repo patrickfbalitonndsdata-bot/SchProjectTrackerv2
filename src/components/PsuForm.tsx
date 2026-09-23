@@ -384,7 +384,13 @@ export const PsuForm: React.FC<PsuFormProps> = ({
           `Successfully logged entry to "${res.sheetName || targetSheetName}" in Google Sheets! (Range: ${res.updatedRange})`
         );
       }
+      setProjectVersionStatuses({});
+      setIsCustomReason(false);
       onSuccessAppend(res.updatedRange);
+
+      setTimeout(() => {
+        setSubmissionSuccess(null);
+      }, 5000);
     } catch (err: any) {
       console.error('Submission error:', err);
       setSubmissionError(err.message || 'Failed to append row(s) to Google Sheets.');
