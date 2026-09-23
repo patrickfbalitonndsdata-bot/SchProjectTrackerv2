@@ -287,7 +287,7 @@ export default function App() {
   const handleResetForm = () => {
     const now = getManilaNow();
     setFormData({
-      emailAddress: formData.emailAddress || '',
+      emailAddress: '',
       scheduler: '',
       region: '',
       psuReceivedDate: now.dateStr,
@@ -318,6 +318,9 @@ export default function App() {
       title: 'Logged to Google Sheet',
       desc: `PSU entry successfully appended to "${sheetConfig.sheetName}" via Google Apps Script. (${updatedRange})`,
     });
+
+    // Automatically clear the form after successful submission
+    handleResetForm();
 
     setTimeout(() => {
       setToastMessage(null);
@@ -537,6 +540,7 @@ export default function App() {
                 sheetConfig={sheetConfig}
                 refreshTrigger={refreshTrigger}
                 onOpenAppsScriptSetup={handleRequestAppsScriptSetup}
+                onViewAllInMirror={() => setActiveTab('mirror')}
               />
             </section>
           </div>
