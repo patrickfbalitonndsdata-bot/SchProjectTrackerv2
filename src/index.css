@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Syne", "Plus Jakarta Sans", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* Modern High-End Editorial Palette Tokens */
+  --color-mcc-chartreuse: #C1A84C;
+  --color-mcc-chartreuse-light: #DFC772;
+  --color-mcc-chartreuse-dark: #9F8735;
+
+  --color-mcc-lime: #E5D0A1;
+  --color-mcc-lime-light: #F4E8D0;
+  --color-mcc-lime-dark: #C9B27E;
+
+  --color-mcc-butter: #FDEDD4;
+  --color-mcc-butter-light: #FFF8EE;
+  --color-mcc-butter-dark: #F3DCB7;
+
+  --color-mcc-sky: #B8C6C9;
+  --color-mcc-sky-light: #DDE5E7;
+  --color-mcc-sky-dark: #8CA0A3;
+
+  --color-mcc-emerald: #334E3D;
+  --color-mcc-emerald-light: #44654F;
+  --color-mcc-emerald-dark: #223529;
+  --color-mcc-emerald-deep: #16241C;
+
+  --color-mcc-canvas: #F8F6F0;
+  --color-mcc-canvas-subtle: #F2EFE8;
+  --color-mcc-card: #FFFFFF;
+  --color-mcc-border: #E8E3D5;
+  --color-mcc-border-strong: #D5CEBE;
+}
+
+body {
+  background-color: #F8F6F0;
+  color: #16241C;
+  font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
