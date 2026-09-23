@@ -15,6 +15,8 @@ interface RecentEntriesProps {
   refreshTrigger: number;
   onOpenAppsScriptSetup?: () => void;
   accessToken?: string | null;
+  onViewAllInMirror?: () => void;
+  maxEntries?: number;
 }
 
 export const DEFAULT_INITIAL_ENTRIES: SheetEntryRow[] = [
@@ -58,6 +60,8 @@ export const RecentEntries: React.FC<RecentEntriesProps> = ({
   refreshTrigger,
   onOpenAppsScriptSetup,
   accessToken,
+  onViewAllInMirror,
+  maxEntries = 5,
 }) => {
   const [entries, setEntries] = useState<SheetEntryRow[]>(DEFAULT_INITIAL_ENTRIES);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -110,6 +114,8 @@ export const RecentEntries: React.FC<RecentEntriesProps> = ({
     );
   });
 
+  const displayed = filtered.slice(0, maxEntries);
+
   if (!sheetConfig.spreadsheetId) {
     return null;
   }
@@ -125,7 +131,7 @@ export const RecentEntries: React.FC<RecentEntriesProps> = ({
             <h3 className="text-xs font-bold uppercase tracking-wider text-neutral-950 font-display flex items-center gap-2">
               <span>Recent Google Sheet Entries</span>
               <span className="text-[10px] font-mono font-medium text-neutral-500 bg-neutral-100 px-2 py-0.5 rounded-xs border border-neutral-200">
-                {entries.length} records
+                Showing {displayed.length} of {entries.length} records (Latest 5)
               </span>
             </h3>
             <p className="text-[11px] text-neutral-500">
@@ -222,7 +228,7 @@ export const RecentEntries: React.FC<RecentEntriesProps> = ({
                 </td>
               </tr>
             ) : (
-              filtered.map((row) => (
+              displayed.map((row) => (
                 <tr key={row.rowNumber} className="hover:bg-neutral-50 transition-colors">
                   <td className="px-3.5 py-2.5 font-mono text-[11px] text-neutral-400">
                     {row.rowNumber}
@@ -271,6 +277,24 @@ export const RecentEntries: React.FC<RecentEntriesProps> = ({
           </tbody>
         </table>
       </div>
+
+      {entries.length > 5 && (
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-3.5 mt-2 border-t border-neutral-100 text-xs text-neutral-500">
+          <span className="text-[11px] text-neutral-500">
+            Displaying only the latest <strong>5 entries</strong> to keep this view uncluttered.
+          </span>
+          {onViewAllInMirror && (
+            <button
+              type="button"
+              onClick={onViewAllInMirror}
+              className="text-[11px] font-bold text-neutral-950 hover:text-black uppercase tracking-wider underline hover:no-underline inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <span>View all {entries.length} records in Sheet Mirror</span>
+              <span>&rarr;</span>
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 };
