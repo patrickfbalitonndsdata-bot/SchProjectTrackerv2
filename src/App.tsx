@@ -21,6 +21,7 @@ import { SheetMirrorViewer } from './components/SheetMirrorViewer';
 import { SheetSettingsModal } from './components/SheetSettingsModal';
 import { AppsScriptSetupModal } from './components/AppsScriptSetupModal';
 import { PasswordPromptModal } from './components/PasswordPromptModal';
+import { ReentryWarningModal, ExistingProjectReentryInfo } from './components/ReentryWarningModal';
 import { PsuFormData, ParseResult, SheetConfig } from './types';
 import { getManilaNow, formatTimeToAmPm } from './lib/dateUtils';
 import { isRevisedVersion } from './lib/roster';
@@ -80,6 +81,40 @@ export default function App() {
   const [pendingProtectedAction, setPendingProtectedAction] = useState<'appsScript' | 'sheetSettings' | null>(null);
   const [codeCopiedBanner, setCodeCopiedBanner] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<'entry' | 'mirror'>('entry');
+
+  // Reentry Warning Modal State
+  const [reentryModalState, setReentryModalState] = useState<{
+    isOpen: boolean;
+    projects: ExistingProjectReentryInfo[];
+    resolver?: (proceed: boolean) => void;
+  } | null>(null);
+
+  // Set of confirmed reentry project numbers for this session
+  const confirmedProjectsRef = React.useRef<Set<string>>(new Set());
+
+  const requestReentryConfirm = (projects: ExistingProjectReentryInfo[]): Promise<boolean> => {
+    return new Promise<boolean>((resolve) => {
+      setReentryModalState({
+        isOpen: true,
+        projects,
+        resolver: resolve,
+      });
+    });
+  };
+
+  const handleReentryContinue = () => {
+    if (reentryModalState?.resolver) {
+      reentryModalState.resolver(true);
+    }
+    setReentryModalState(null);
+  };
+
+  const handleReentryCancel = () => {
+    if (reentryModalState?.resolver) {
+      reentryModalState.resolver(false);
+    }
+    setReentryModalState(null);
+  };
 
   const handleRequestAppsScriptSetup = () => {
     setPendingProtectedAction('appsScript');
@@ -223,9 +258,10 @@ export default function App() {
     const resolvedProjects = await Promise.all(
       rawProjects.map(async (proj) => {
         let pVersion = proj.version || defaultInitialVersion;
+        let existingCount = 0;
         if (proj.projectNumber && proj.projectNumber.trim()) {
           try {
-            const { version } = await calculateProjectVersion(
+            const { version, existingCount: count } = await calculateProjectVersion(
               sheetConfig.spreadsheetId,
               sheetConfig.sheetName,
               proj.projectNumber.trim(),
@@ -235,6 +271,7 @@ export default function App() {
               targetRegion
             );
             pVersion = version;
+            existingCount = count;
           } catch (err) {
             console.warn('Could not auto-calculate version on parse for', proj.projectNumber, err);
           }
@@ -244,9 +281,47 @@ export default function App() {
           ...proj,
           version: pVersion,
           jobType: pIsRev ? 'Re-PSU (Revised)' : 'New Installs',
+          existingCount,
         };
       })
     );
+
+    // Check for any duplicate / existing project numbers
+    const existingDuplicates = resolvedProjects.filter(
+      (p) => (p.existingCount || 0) > 0 && p.projectNumber && p.projectNumber.trim().length > 0
+    );
+
+    if (existingDuplicates.length > 0) {
+      const duplicateInfos: ExistingProjectReentryInfo[] = existingDuplicates.map((p) => ({
+        id: p.id,
+        projectNumber: p.projectNumber,
+        existingCount: p.existingCount || 1,
+        suggestedVersion: p.version,
+        targetJobType: p.jobType || 'Re-PSU (Revised)',
+        sheetName: sheetConfig.sheetName,
+        study: p.study,
+        sourceFile: p.sourceFile,
+        source: 'file_parse',
+      }));
+
+      const proceed = await requestReentryConfirm(duplicateInfos);
+      if (!proceed) {
+        // Option "Cancel" which will not go through
+        setCurrentResult(null);
+        const dupNumbers = existingDuplicates.map((p) => p.projectNumber).join(', ');
+        setToastMessage({
+          title: 'Reentry Cancelled',
+          desc: `Project ${dupNumbers} already exists in "${sheetConfig.sheetName}". Reentry was cancelled and form was not populated.`,
+        });
+        setTimeout(() => setToastMessage(null), 5000);
+        return;
+      }
+
+      // Option "Continue" which will have go through the new version (v1, v2 ... so on)
+      existingDuplicates.forEach((p) =>
+        confirmedProjectsRef.current.add(p.projectNumber.trim().toLowerCase())
+      );
+    }
 
     const primaryProject = resolvedProjects[0];
     const primaryNumber = primaryProject?.projectNumber || ext.projectNumber || '';
@@ -309,6 +384,7 @@ export default function App() {
       reason: '',
       remarks: '',
     });
+    confirmedProjectsRef.current.clear();
     setCurrentResult(null);
   };
 
@@ -511,6 +587,9 @@ export default function App() {
                   onSyncSheetConfig={handleSaveSheetConfig}
                   recentEntries={DEFAULT_INITIAL_ENTRIES}
                   attachments={currentResult?.metadata?.attachments || []}
+                  onRequestReentryConfirm={requestReentryConfirm}
+                  confirmedProjectsRef={confirmedProjectsRef}
+                  onShowToast={setToastMessage}
                 />
               </div>
             </div>
@@ -623,6 +702,17 @@ export default function App() {
         onSaveConfig={handleSaveSheetConfig}
         onRequireAuth={handleRequestAppsScriptSetup}
       />
+
+      {/* Existing Project Number Reentry Warning Modal */}
+      {reentryModalState && (
+        <ReentryWarningModal
+          isOpen={reentryModalState.isOpen}
+          projects={reentryModalState.projects}
+          sheetName={sheetConfig.sheetName}
+          onCancel={handleReentryCancel}
+          onContinue={handleReentryContinue}
+        />
+      )}
     </div>
   );
 }
