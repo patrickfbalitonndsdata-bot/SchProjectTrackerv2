@@ -31,6 +31,7 @@ import {
 import { PsuFormData, SheetConfig, SheetEntryRow, AppendResult, ProjectItem, AttachmentInfo } from '../types';
 import { appendPsuEntries, calculateProjectVersion, formatProjectVersion, FIXED_SPREADSHEET_URL, FIXED_SHEET_NAME } from '../lib/sheetsApi';
 import { PdfViewerModal } from './PdfViewerModal';
+import { ExistingProjectReentryInfo } from './ReentryWarningModal';
 import {
   SCHEDULER_ROSTER,
   PSU_CATEGORIES,
@@ -56,6 +57,9 @@ interface PsuFormProps {
   accessToken?: string | null;
   recentEntries?: SheetEntryRow[];
   attachments?: AttachmentInfo[];
+  onRequestReentryConfirm?: (projects: ExistingProjectReentryInfo[]) => Promise<boolean>;
+  confirmedProjectsRef?: React.MutableRefObject<Set<string>>;
+  onShowToast?: (msg: { title: string; desc: string }) => void;
 }
 
 export const PsuForm: React.FC<PsuFormProps> = ({
@@ -70,6 +74,9 @@ export const PsuForm: React.FC<PsuFormProps> = ({
   accessToken,
   recentEntries = [],
   attachments = [],
+  onRequestReentryConfirm,
+  confirmedProjectsRef,
+  onShowToast,
 }) => {
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [submissionSuccess, setSubmissionSuccess] = useState<string | null>(null);
@@ -85,6 +92,10 @@ export const PsuForm: React.FC<PsuFormProps> = ({
   const [projectVersionStatuses, setProjectVersionStatuses] = useState<
     Record<string, { count: number; suggestedVersion: string; loading?: boolean }>
   >({});
+
+  const fallbackConfirmedRef = React.useRef<Set<string>>(new Set());
+  const confirmedProjects = confirmedProjectsRef || fallbackConfirmedRef;
+  const typingTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const hasApiConnection = Boolean(sheetConfig.appsScriptUrl || accessToken);
 
@@ -168,17 +179,26 @@ export const PsuForm: React.FC<PsuFormProps> = ({
       projects: updated,
     });
 
-    // If project number changed, trigger version check for this project
+    // If project number changed, debounce version check for this project
     if (field === 'projectNumber') {
       const trimmed = value.trim();
-      if (trimmed) {
-        checkSingleProjectVersion(id, trimmed);
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+      }
+      if (trimmed.length >= 4) {
+        typingTimeoutRef.current = setTimeout(() => {
+          checkSingleProjectVersion(id, trimmed);
+        }, 600);
       }
     }
   };
 
   // Check version against Google Sheet for a specific project
-  const checkSingleProjectVersion = async (pId: string, pNumber: string) => {
+  const checkSingleProjectVersion = async (
+    pId: string,
+    pNumber: string,
+    isSilentSync: boolean = false
+  ) => {
     const trimmed = pNumber.trim();
     if (!trimmed) return;
 
@@ -203,7 +223,78 @@ export const PsuForm: React.FC<PsuFormProps> = ({
         [pId]: { count: existingCount, suggestedVersion: version, loading: false },
       }));
 
-      // Update project's version if blank or matching standard/initial/v#
+      const isAlreadyConfirmed = confirmedProjects.current.has(trimmed.toLowerCase());
+
+      // If existing project detected in Google Sheet and not yet confirmed:
+      // Show warning modal with Cancel (will not go through) or Continue (go through with new version)
+      if (existingCount > 0 && !isAlreadyConfirmed && !isSilentSync && onRequestReentryConfirm) {
+        const curProj = projectsList.find((p) => p.id === pId);
+        const proceed = await onRequestReentryConfirm([
+          {
+            id: pId,
+            projectNumber: trimmed,
+            existingCount,
+            suggestedVersion: version,
+            targetJobType: 'Re-PSU (Revised)',
+            sheetName: sheetConfig.sheetName,
+            study: curProj?.study,
+            sourceFile: curProj?.sourceFile,
+            source: 'form_input',
+          },
+        ]);
+
+        if (proceed) {
+          // "Continue" which will have go through the new version (v1, v2 ... so on)
+          confirmedProjects.current.add(trimmed.toLowerCase());
+          const isRev = isRevisedVersion(version);
+          const nextJobType = isRev ? 'Re-PSU (Revised)' : 'New Installs';
+
+          const updated = projectsList.map((p) =>
+            p.id === pId ? { ...p, projectNumber: trimmed, version, jobType: nextJobType } : p
+          );
+          const primary = updated[0];
+          onChange({
+            ...formData,
+            projectNumber: primary?.projectNumber || '',
+            study: primary?.study || '',
+            version: primary?.version || '',
+            jobType: primary?.jobType || 'New Installs',
+            projects: updated,
+          });
+          onShowToast?.({
+            title: 'Reentry Confirmed',
+            desc: `Project ${trimmed} confirmed for revision ${version} (Job Type: Re-PSU (Revised)).`,
+          });
+          return;
+        } else {
+          // "Cancel" which will not go through: clear the project number
+          confirmedProjects.current.delete(trimmed.toLowerCase());
+          const updated = projectsList.map((p) =>
+            p.id === pId ? { ...p, projectNumber: '', version: 'Initial', jobType: 'New Installs' } : p
+          );
+          const primary = updated[0];
+          onChange({
+            ...formData,
+            projectNumber: primary?.projectNumber || '',
+            study: primary?.study || '',
+            version: primary?.version || 'Initial',
+            jobType: primary?.jobType || 'New Installs',
+            projects: updated,
+          });
+          setProjectVersionStatuses((prev) => {
+            const next = { ...prev };
+            delete next[pId];
+            return next;
+          });
+          onShowToast?.({
+            title: 'Reentry Cancelled',
+            desc: `Project ${trimmed} cancelled. Project Number field cleared.`,
+          });
+          return;
+        }
+      }
+
+      // Normal flow (initial or already confirmed)
       const currentProj = projectsList.find((item) => item.id === pId);
       if (
         currentProj &&
@@ -241,12 +332,12 @@ export const PsuForm: React.FC<PsuFormProps> = ({
     }
   };
 
-  // Check versions for all projects when Region changes
+  // Check versions for all projects when Region changes (silent sync)
   useEffect(() => {
     const timer = setTimeout(() => {
       projectsList.forEach((proj) => {
         if (proj.projectNumber && proj.projectNumber.trim()) {
-          checkSingleProjectVersion(proj.id, proj.projectNumber.trim());
+          checkSingleProjectVersion(proj.id, proj.projectNumber.trim(), true);
         }
       });
     }, 400);
@@ -350,6 +441,38 @@ export const PsuForm: React.FC<PsuFormProps> = ({
       return;
     }
 
+    // Safety check for unconfirmed duplicates before submission
+    if (onRequestReentryConfirm) {
+      const unconfirmedDups: ExistingProjectReentryInfo[] = [];
+      for (const proj of validProjects) {
+        const pNum = proj.projectNumber.trim();
+        if (confirmedProjects.current.has(pNum.toLowerCase())) continue;
+        const status = projectVersionStatuses[proj.id];
+        if (status && status.count > 0) {
+          unconfirmedDups.push({
+            id: proj.id,
+            projectNumber: pNum,
+            existingCount: status.count,
+            suggestedVersion: status.suggestedVersion,
+            targetJobType: 'Re-PSU (Revised)',
+            sheetName: sheetConfig.sheetName,
+            study: proj.study,
+            sourceFile: proj.sourceFile,
+            source: 'form_input',
+          });
+        }
+      }
+
+      if (unconfirmedDups.length > 0) {
+        const proceed = await onRequestReentryConfirm(unconfirmedDups);
+        if (!proceed) {
+          setSubmissionError('Submission cancelled due to existing Project Number reentry.');
+          return;
+        }
+        unconfirmedDups.forEach((p) => confirmedProjects.current.add(p.projectNumber.trim().toLowerCase()));
+      }
+    }
+
     // Default remarks to "N/A" if left blank by user
     const finalRemarks = formData.remarks?.trim() || 'N/A';
 
@@ -386,6 +509,7 @@ export const PsuForm: React.FC<PsuFormProps> = ({
       }
       setProjectVersionStatuses({});
       setIsCustomReason(false);
+      confirmedProjects.current.clear();
       onSuccessAppend(res.updatedRange);
 
       setTimeout(() => {
@@ -719,6 +843,11 @@ export const PsuForm: React.FC<PsuFormProps> = ({
                         onChange={(e) =>
                           handleUpdateProjectField(project.id, 'projectNumber', e.target.value)
                         }
+                        onBlur={() => {
+                          if (project.projectNumber && project.projectNumber.trim().length >= 4) {
+                            checkSingleProjectVersion(project.id, project.projectNumber.trim());
+                          }
+                        }}
                         className="w-full h-9.5 px-3 text-xs border border-neutral-300 rounded-md bg-white text-neutral-950 placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-950 focus:border-neutral-950 font-mono shadow-2xs"
                       />
                     </div>
@@ -849,8 +978,9 @@ export const PsuForm: React.FC<PsuFormProps> = ({
                               1st entry &rarr; <strong>{status.suggestedVersion}</strong>
                             </span>
                           ) : (
-                            <span className="text-neutral-900 font-semibold">
-                              {status.count} prior &rarr; <strong>{status.suggestedVersion}</strong>
+                            <span className="text-amber-800 font-semibold inline-flex items-center gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
+                              <span>{status.count} prior &rarr; <strong>{status.suggestedVersion}</strong> (Re-PSU)</span>
                             </span>
                           )}
                         </span>
