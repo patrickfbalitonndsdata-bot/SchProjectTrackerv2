@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Send,
   RotateCcw,
@@ -27,6 +27,8 @@ import {
   ChevronDown,
   Sparkles,
   Eye,
+  History,
+  X,
 } from 'lucide-react';
 import { PsuFormData, SheetConfig, SheetEntryRow, AppendResult, ProjectItem, AttachmentInfo } from '../types';
 import { appendPsuEntries, calculateProjectVersion, formatProjectVersion, FIXED_SPREADSHEET_URL, FIXED_SHEET_NAME } from '../lib/sheetsApi';
@@ -87,6 +89,107 @@ export const PsuForm: React.FC<PsuFormProps> = ({
   const [showKeywordChips, setShowKeywordChips] = useState<boolean>(false);
   const [viewingAttachment, setViewingAttachment] = useState<AttachmentInfo | null>(null);
   const [viewingProjectId, setViewingProjectId] = useState<string | null>(null);
+
+  // Storage key for remembering entered email addresses ONLY (decoupled from any other field)
+  const STORAGE_KEY_REMEMBERED_EMAILS = 'psu_remembered_emails_history';
+
+  // Dedicated remembered emails state: ONLY stores email addresses, never other form fields
+  const [rememberedEmails, setRememberedEmails] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_REMEMBERED_EMAILS);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to parse remembered emails from storage:', e);
+    }
+
+    const initialSet = new Set<string>();
+    if (userEmail && userEmail.includes('@')) initialSet.add(userEmail.trim());
+    if (formData.emailAddress && formData.emailAddress.includes('@')) initialSet.add(formData.emailAddress.trim());
+    recentEntries.forEach((r) => {
+      if (r.emailAddress && r.emailAddress.includes('@')) {
+        initialSet.add(r.emailAddress.trim());
+      }
+    });
+    initialSet.add('Chantel.Campa@ndsdata.com');
+    initialSet.add('raymond.buchberg@ndsdata.com');
+    return Array.from(initialSet);
+  });
+
+  const [showEmailSuggestions, setShowEmailSuggestions] = useState<boolean>(false);
+  const emailContainerRef = useRef<HTMLDivElement>(null);
+  const emailInputRef = useRef<HTMLInputElement>(null);
+  const isEmailFieldFocusedRef = useRef<boolean>(false);
+  const lastEmailTouchTimestampRef = useRef<number>(0);
+
+  // Helper to save a valid email address to remembered list
+  const saveRememberedEmail = (email: string) => {
+    const trimmed = email.trim();
+    if (!trimmed || !trimmed.includes('@') || !trimmed.includes('.')) return;
+    setRememberedEmails((prev) => {
+      const filtered = prev.filter((e) => e.toLowerCase() !== trimmed.toLowerCase());
+      const next = [trimmed, ...filtered].slice(0, 30);
+      try {
+        localStorage.setItem(STORAGE_KEY_REMEMBERED_EMAILS, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  // Helper to remove an email from remembered list
+  const removeRememberedEmail = (emailToRemove: string) => {
+    setRememberedEmails((prev) => {
+      const next = prev.filter((e) => e.toLowerCase() !== emailToRemove.toLowerCase());
+      try {
+        localStorage.setItem(STORAGE_KEY_REMEMBERED_EMAILS, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  // Helper to clear all remembered emails
+  const clearAllRememberedEmails = () => {
+    setRememberedEmails([]);
+    try {
+      localStorage.removeItem(STORAGE_KEY_REMEMBERED_EMAILS);
+    } catch {}
+  };
+
+  // Dedicated selection handler: ONLY updates emailAddress, never touching any other input field
+  const handleSelectRememberedEmail = (selectedEmail: string) => {
+    lastEmailTouchTimestampRef.current = Date.now();
+    onChange({
+      ...formData,
+      emailAddress: selectedEmail,
+    });
+    saveRememberedEmail(selectedEmail);
+    setShowEmailSuggestions(false);
+  };
+
+  // Click outside listener to close email suggestions popup
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (
+        emailContainerRef.current &&
+        !emailContainerRef.current.contains(e.target as Node)
+      ) {
+        setShowEmailSuggestions(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Filtered emails for autocomplete popup
+  const filteredRememberedEmails = useMemo(() => {
+    const current = formData.emailAddress?.trim().toLowerCase() || '';
+    if (!current) return rememberedEmails;
+    return rememberedEmails.filter((em) => em.toLowerCase().includes(current));
+  }, [rememberedEmails, formData.emailAddress]);
 
   // Per-project version checking status map
   const [projectVersionStatuses, setProjectVersionStatuses] = useState<
@@ -151,6 +254,16 @@ export const PsuForm: React.FC<PsuFormProps> = ({
 
   // Helper to update a project's field
   const handleUpdateProjectField = (id: string, field: keyof ProjectItem, value: string) => {
+    // If browser attempts to autofill project fields while email field is active or immediately touched, ignore
+    const isAutofillFromEmail =
+      isEmailFieldFocusedRef.current ||
+      document.activeElement?.id === 'email-address-input' ||
+      Date.now() - lastEmailTouchTimestampRef.current < 600;
+
+    if (isAutofillFromEmail && document.activeElement?.id !== `proj-${id}-${field}`) {
+      return;
+    }
+
     const updated = projectsList.map((p) => {
       if (p.id !== id) return p;
       let finalVal = value;
@@ -344,7 +457,19 @@ export const PsuForm: React.FC<PsuFormProps> = ({
     return () => clearTimeout(timer);
   }, [formData.region, sheetConfig.appsScriptUrl, sheetConfig.spreadsheetId, sheetConfig.sheetName]);
 
-  const updateField = (field: keyof PsuFormData, value: string) => {
+  const updateField = (field: keyof PsuFormData, value: string, targetElementId?: string) => {
+    // If browser attempts to autofill non-email fields while email field is active or immediately touched, ignore it!
+    if (field !== 'emailAddress') {
+      const isAutofillFromEmail =
+        isEmailFieldFocusedRef.current ||
+        document.activeElement?.id === 'email-address-input' ||
+        Date.now() - lastEmailTouchTimestampRef.current < 600;
+
+      if (isAutofillFromEmail && targetElementId && document.activeElement?.id !== targetElementId) {
+        return;
+      }
+    }
+
     if (field === 'category') {
       const isInitialCategory = value.trim().toLowerCase() === 'initial';
       if (isInitialCategory) {
@@ -364,6 +489,16 @@ export const PsuForm: React.FC<PsuFormProps> = ({
   };
 
   const handleSchedulerSelect = (selectedName: string) => {
+    // If triggered by browser profile autofill while email field is active, ignore
+    const isAutofillFromEmail =
+      isEmailFieldFocusedRef.current ||
+      document.activeElement?.id === 'email-address-input' ||
+      Date.now() - lastEmailTouchTimestampRef.current < 600;
+
+    if (isAutofillFromEmail && document.activeElement?.id !== 'psu-scheduler-select') {
+      return;
+    }
+
     if (!selectedName) {
       onChange({
         ...formData,
@@ -510,6 +645,9 @@ export const PsuForm: React.FC<PsuFormProps> = ({
       setProjectVersionStatuses({});
       setIsCustomReason(false);
       confirmedProjects.current.clear();
+      if (formData.emailAddress && formData.emailAddress.includes('@')) {
+        saveRememberedEmail(formData.emailAddress);
+      }
       onSuccessAppend(res.updatedRange);
 
       setTimeout(() => {
@@ -551,28 +689,174 @@ export const PsuForm: React.FC<PsuFormProps> = ({
         </div>
       </div>
 
-      <form onSubmit={handleSubmit} className="mt-6 space-y-5">
+      <form onSubmit={handleSubmit} autoComplete="off" data-lpignore="true" className="mt-6 space-y-5">
         {/* Row 1: Personnel & Region (3 Balanced Columns) */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div>
-            <label htmlFor="email-address-input" className="block text-[11px] font-bold uppercase tracking-wider text-neutral-700 mb-1.5 flex items-center gap-1.5">
-              <Mail className="w-3.5 h-3.5 text-neutral-950" />
-              Email Address <span className="text-rose-500">*</span>
-            </label>
-            <input
-              id="email-address-input"
-              type="email"
-              required
-              placeholder="e.g., Chantel.Campa@ndsdata.com"
-              value={formData.emailAddress}
-              onChange={(e) => updateField('emailAddress', e.target.value)}
-              className="w-full h-10 px-3.5 text-xs border border-neutral-300 rounded-md bg-white text-neutral-950 placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-950 focus:border-neutral-950 font-medium shadow-2xs"
-            />
+          {/* Email Address with standalone remembered email autocomplete */}
+          <div className="relative" ref={emailContainerRef}>
+            <div className="flex items-center justify-between mb-1.5">
+              <label htmlFor="email-address-input" className="block text-[11px] font-bold uppercase tracking-wider text-neutral-700 flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5 text-neutral-950" />
+                <span>Email Address</span> <span className="text-rose-500">*</span>
+              </label>
+              {formData.emailAddress && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    updateField('emailAddress', '');
+                    emailInputRef.current?.focus();
+                  }}
+                  className="text-[10px] text-neutral-500 hover:text-neutral-950 underline"
+                  title="Clear email address field"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+
+            <div className="relative">
+              <input
+                ref={emailInputRef}
+                id="email-address-input"
+                name="psu_isolated_email_only"
+                type="email"
+                required
+                autoComplete="off"
+                data-lpignore="true"
+                data-form-type="other"
+                list="psu-saved-emails-list"
+                placeholder="e.g., Chantel.Campa@ndsdata.com"
+                value={formData.emailAddress}
+                onFocus={() => {
+                  isEmailFieldFocusedRef.current = true;
+                  setShowEmailSuggestions(true);
+                }}
+                onBlur={() => {
+                  // Delay closing dropdown slightly so click handlers can register
+                  setTimeout(() => {
+                    isEmailFieldFocusedRef.current = false;
+                    setShowEmailSuggestions(false);
+                    if (formData.emailAddress && formData.emailAddress.includes('@')) {
+                      saveRememberedEmail(formData.emailAddress);
+                    }
+                  }, 250);
+                }}
+                onChange={(e) => {
+                  lastEmailTouchTimestampRef.current = Date.now();
+                  updateField('emailAddress', e.target.value);
+                  setShowEmailSuggestions(true);
+                }}
+                className="w-full h-10 pl-3.5 pr-8 text-xs border border-neutral-300 rounded-md bg-white text-neutral-950 placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-950 focus:border-neutral-950 font-medium shadow-2xs"
+              />
+
+              {/* Native datalist for standard browser autocomplete */}
+              <datalist id="psu-saved-emails-list">
+                {rememberedEmails.map((email) => (
+                  <option key={email} value={email} />
+                ))}
+              </datalist>
+
+              {/* Suggestions toggle button */}
+              <button
+                type="button"
+                tabIndex={-1}
+                onClick={() => {
+                  setShowEmailSuggestions((prev) => !prev);
+                  emailInputRef.current?.focus();
+                }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-700 p-1"
+                title="View remembered email addresses"
+              >
+                <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showEmailSuggestions ? 'rotate-180' : ''}`} />
+              </button>
+            </div>
+
+            {/* Custom Remembered Email Addresses Dropdown */}
+            {showEmailSuggestions && (
+              <div
+                className="absolute left-0 right-0 top-full mt-1 z-40 bg-white border border-neutral-300 rounded-lg shadow-xl p-1.5 max-h-60 overflow-y-auto space-y-1"
+                onMouseDown={(e) => e.preventDefault()}
+              >
+                <div className="flex items-center justify-between px-2 py-1 border-b border-neutral-100 text-[10px] text-neutral-500 font-semibold uppercase tracking-wider">
+                  <span className="flex items-center gap-1">
+                    <History className="w-3 h-3 text-neutral-700" />
+                    Remembered Emails (Only fills email)
+                  </span>
+                  {rememberedEmails.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={clearAllRememberedEmails}
+                      className="text-[9px] text-neutral-400 hover:text-rose-600 transition-colors uppercase"
+                    >
+                      Clear All
+                    </button>
+                  )}
+                </div>
+
+                {filteredRememberedEmails.length > 0 ? (
+                  <div className="space-y-0.5">
+                    {filteredRememberedEmails.map((email) => (
+                      <div
+                        key={email}
+                        className={`group flex items-center justify-between px-2.5 py-1.5 text-xs rounded-md transition-colors cursor-pointer ${
+                          formData.emailAddress.toLowerCase() === email.toLowerCase()
+                            ? 'bg-neutral-900 text-white font-semibold'
+                            : 'hover:bg-neutral-100 text-neutral-900 font-normal'
+                        }`}
+                        onClick={() => handleSelectRememberedEmail(email)}
+                      >
+                        <div className="flex items-center gap-2 truncate">
+                          <Mail className={`w-3 h-3 shrink-0 ${formData.emailAddress.toLowerCase() === email.toLowerCase() ? 'text-amber-300' : 'text-neutral-400'}`} />
+                          <span className="truncate">{email}</span>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {formData.emailAddress.toLowerCase() === email.toLowerCase() && (
+                            <span className="text-[10px] text-emerald-400 font-bold mr-1">Selected</span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeRememberedEmail(email);
+                            }}
+                            className={`p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity ${
+                              formData.emailAddress.toLowerCase() === email.toLowerCase()
+                                ? 'text-neutral-300 hover:text-white hover:bg-neutral-800'
+                                : 'text-neutral-400 hover:text-rose-600 hover:bg-neutral-200'
+                            }`}
+                            title="Remove from remembered emails"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="px-2.5 py-2 text-xs text-neutral-500 italic">
+                    {formData.emailAddress
+                      ? `No match for "${formData.emailAddress}". Typed address will save on submit/blur.`
+                      : 'No remembered emails yet. Enter an email address to save it.'}
+                  </div>
+                )}
+
+                <div className="px-2 pt-1 border-t border-neutral-100 text-[9px] text-neutral-500 flex items-center justify-between">
+                  <span>Selecting fills <strong>email only</strong> (other inputs unchanged)</span>
+                  <span>{rememberedEmails.length} saved</span>
+                </div>
+              </div>
+            )}
+
+            <p className="text-[10px] text-neutral-500 mt-1 flex items-center gap-1">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"></span>
+              <span>Only remembers entered email addresses; leaves all other inputs untouched.</span>
+            </p>
           </div>
 
+          {/* Scheduler Name */}
           <div>
             <div className="flex items-center justify-between mb-1.5">
-              <label htmlFor="scheduler-select" className="text-[11px] font-bold uppercase tracking-wider text-neutral-700 flex items-center gap-1.5">
+              <label htmlFor="psu-scheduler-select" className="text-[11px] font-bold uppercase tracking-wider text-neutral-700 flex items-center gap-1.5">
                 <User className="w-3.5 h-3.5 text-neutral-950" />
                 Scheduler Name <span className="text-rose-500">*</span>
               </label>
@@ -587,8 +871,11 @@ export const PsuForm: React.FC<PsuFormProps> = ({
               )}
             </div>
             <select
-              id="scheduler-select"
+              id="psu-scheduler-select"
+              name="psu_form_scheduler"
               required
+              autoComplete="off"
+              data-lpignore="true"
               value={formData.scheduler}
               onChange={(e) => handleSchedulerSelect(e.target.value)}
               className="w-full h-10 px-3.5 text-xs border border-neutral-300 rounded-md bg-white text-neutral-950 focus:outline-none focus:ring-2 focus:ring-neutral-950 focus:border-neutral-950 font-medium shadow-2xs"
@@ -605,16 +892,17 @@ export const PsuForm: React.FC<PsuFormProps> = ({
             </select>
           </div>
 
+          {/* Region */}
           <div>
             <div className="flex items-center justify-between mb-1.5">
-              <label htmlFor="region-input" className="text-[11px] font-bold uppercase tracking-wider text-neutral-700 flex items-center gap-1.5">
+              <label htmlFor="psu-operational-area" className="text-[11px] font-bold uppercase tracking-wider text-neutral-700 flex items-center gap-1.5">
                 <Globe className="w-3.5 h-3.5 text-neutral-950" />
                 Region <span className="text-rose-500">*</span>
               </label>
               {formData.region && (
                 <button
                   type="button"
-                  onClick={() => updateField('region', '')}
+                  onClick={() => updateField('region', '', 'psu-operational-area')}
                   className="text-[10px] text-neutral-500 hover:text-neutral-950 underline"
                 >
                   Clear
@@ -623,13 +911,16 @@ export const PsuForm: React.FC<PsuFormProps> = ({
             </div>
             <div className="relative">
               <input
-                id="region-input"
+                id="psu-operational-area"
+                name="psu_form_region"
                 type="text"
                 list="common-regions-list"
                 required
+                autoComplete="off"
+                data-lpignore="true"
                 placeholder="Pick from list or enter region manually..."
                 value={formData.region}
-                onChange={(e) => updateField('region', e.target.value)}
+                onChange={(e) => updateField('region', e.target.value, 'psu-operational-area')}
                 className="w-full h-10 px-3.5 text-xs border border-neutral-300 rounded-md bg-white text-neutral-950 font-medium focus:outline-none focus:ring-2 focus:ring-neutral-950 focus:border-neutral-950 shadow-2xs"
               />
               <datalist id="common-regions-list">
@@ -652,10 +943,13 @@ export const PsuForm: React.FC<PsuFormProps> = ({
             </label>
             <input
               id="psu-date-input"
+              name="psu_form_received_date"
               type="date"
               required
+              autoComplete="off"
+              data-lpignore="true"
               value={formData.psuReceivedDate}
-              onChange={(e) => updateField('psuReceivedDate', e.target.value)}
+              onChange={(e) => updateField('psuReceivedDate', e.target.value, 'psu-date-input')}
               className="w-full h-10 px-3.5 text-xs border border-neutral-300 rounded-md bg-white text-neutral-950 font-mono focus:outline-none focus:ring-2 focus:ring-neutral-950 focus:border-neutral-950 shadow-2xs"
             />
           </div>
@@ -667,11 +961,14 @@ export const PsuForm: React.FC<PsuFormProps> = ({
             </label>
             <input
               id="psu-time-input"
+              name="psu_form_received_time"
               type="text"
               required
+              autoComplete="off"
+              data-lpignore="true"
               placeholder="e.g., 4:45 PM"
               value={formData.psuReceivedTime}
-              onChange={(e) => updateField('psuReceivedTime', e.target.value)}
+              onChange={(e) => updateField('psuReceivedTime', e.target.value, 'psu-time-input')}
               className="w-full h-10 px-3.5 text-xs border border-neutral-300 rounded-md bg-white text-neutral-950 font-mono focus:outline-none focus:ring-2 focus:ring-neutral-950 focus:border-neutral-950 shadow-2xs"
             />
           </div>
@@ -830,14 +1127,18 @@ export const PsuForm: React.FC<PsuFormProps> = ({
                     {/* Project Number */}
                     <div>
                       <div className="flex items-center justify-between mb-1.5 h-5">
-                        <label className="text-[11px] font-bold uppercase tracking-wider text-neutral-700 flex items-center gap-1.5 whitespace-nowrap">
+                        <label htmlFor={`proj-${project.id}-projectNumber`} className="text-[11px] font-bold uppercase tracking-wider text-neutral-700 flex items-center gap-1.5 whitespace-nowrap">
                           <Hash className="w-3 h-3 text-neutral-950 shrink-0" />
                           <span>Project Number</span> <span className="text-rose-500">*</span>
                         </label>
                       </div>
                       <input
+                        id={`proj-${project.id}-projectNumber`}
+                        name={`psu_proj_num_${project.id}`}
                         type="text"
                         required
+                        autoComplete="off"
+                        data-lpignore="true"
                         placeholder="e.g., 26-770124"
                         value={project.projectNumber}
                         onChange={(e) =>
@@ -855,7 +1156,7 @@ export const PsuForm: React.FC<PsuFormProps> = ({
                     {/* Study / Study Type */}
                     <div className="relative">
                       <div className="flex items-center justify-between mb-1.5 h-5">
-                        <label className="text-[11px] font-bold uppercase tracking-wider text-neutral-700 flex items-center gap-1.5 whitespace-nowrap">
+                        <label htmlFor={`proj-${project.id}-study`} className="text-[11px] font-bold uppercase tracking-wider text-neutral-700 flex items-center gap-1.5 whitespace-nowrap">
                           <BookOpen className="w-3 h-3 text-neutral-950 shrink-0" />
                           <span>Study / Study Type</span>
                         </label>
@@ -863,7 +1164,11 @@ export const PsuForm: React.FC<PsuFormProps> = ({
 
                       <div className="relative">
                         <input
+                          id={`proj-${project.id}-study`}
+                          name={`psu_proj_study_${project.id}`}
                           type="text"
+                          autoComplete="off"
+                          data-lpignore="true"
                           list="study-types-datalist"
                           placeholder="e.g., TMC, ATR, Radar..."
                           value={project.study}
@@ -931,7 +1236,7 @@ export const PsuForm: React.FC<PsuFormProps> = ({
                     {/* Version */}
                     <div>
                       <div className="flex items-center justify-between mb-1.5 h-5">
-                        <label className="text-[11px] font-bold uppercase tracking-wider text-neutral-700 flex items-center gap-1.5 whitespace-nowrap">
+                        <label htmlFor={`proj-${project.id}-version`} className="text-[11px] font-bold uppercase tracking-wider text-neutral-700 flex items-center gap-1.5 whitespace-nowrap">
                           <GitBranch className="w-3 h-3 text-neutral-950 shrink-0" />
                           <span>Version</span>
                         </label>
@@ -953,7 +1258,11 @@ export const PsuForm: React.FC<PsuFormProps> = ({
                         )}
                       </div>
                       <input
+                        id={`proj-${project.id}-version`}
+                        name={`psu_proj_ver_${project.id}`}
                         type="text"
+                        autoComplete="off"
+                        data-lpignore="true"
                         placeholder="Initial, v2, v3, ..."
                         value={project.version}
                         onChange={(e) =>
@@ -990,13 +1299,17 @@ export const PsuForm: React.FC<PsuFormProps> = ({
                     {/* Job Type */}
                     <div>
                       <div className="flex items-center justify-between mb-1.5 h-5">
-                        <label className="text-[11px] font-bold uppercase tracking-wider text-neutral-700 flex items-center gap-1.5 whitespace-nowrap">
+                        <label htmlFor={`proj-${project.id}-jobType`} className="text-[11px] font-bold uppercase tracking-wider text-neutral-700 flex items-center gap-1.5 whitespace-nowrap">
                           <Briefcase className="w-3 h-3 text-neutral-950 shrink-0" />
                           <span>Job Type</span> <span className="text-rose-500">*</span>
                         </label>
                       </div>
                       <select
+                        id={`proj-${project.id}-jobType`}
+                        name={`psu_proj_jt_${project.id}`}
                         required
+                        autoComplete="off"
+                        data-lpignore="true"
                         value={project.jobType || 'New Installs'}
                         onChange={(e) =>
                           handleUpdateProjectField(project.id, 'jobType', e.target.value)
@@ -1040,9 +1353,12 @@ export const PsuForm: React.FC<PsuFormProps> = ({
           </label>
           <select
             id="category-select"
+            name="psu_form_category"
             required
+            autoComplete="off"
+            data-lpignore="true"
             value={formData.category}
-            onChange={(e) => updateField('category', e.target.value)}
+            onChange={(e) => updateField('category', e.target.value, 'category-select')}
             className="w-full h-10 px-3.5 text-xs border border-neutral-300 rounded-md bg-white text-neutral-950 focus:outline-none focus:ring-2 focus:ring-neutral-950 focus:border-neutral-950 font-medium shadow-2xs"
           >
             <option value="">(Select Category)</option>
@@ -1078,15 +1394,18 @@ export const PsuForm: React.FC<PsuFormProps> = ({
           {isCustomReason ? (
             <input
               id="reason-input"
+              name="psu_form_reason_text"
               type="text"
               required
+              autoComplete="off"
+              data-lpignore="true"
               placeholder={
                 formData.category
                   ? 'Enter custom reason or description...'
                   : 'Please select a Category above first...'
               }
               value={formData.reason}
-              onChange={(e) => updateField('reason', e.target.value)}
+              onChange={(e) => updateField('reason', e.target.value, 'reason-input')}
               disabled={!formData.category}
               className={`w-full h-10 px-3.5 text-xs border rounded-md font-medium shadow-2xs focus:outline-none transition-colors ${
                 !formData.category
@@ -1097,15 +1416,18 @@ export const PsuForm: React.FC<PsuFormProps> = ({
           ) : (
             <select
               id="reason-select"
+              name="psu_form_reason_select"
               required
+              autoComplete="off"
+              data-lpignore="true"
               value={formData.reason}
               disabled={!formData.category}
               onChange={(e) => {
                 if (e.target.value === '__OTHER_CUSTOM__') {
                   setIsCustomReason(true);
-                  updateField('reason', '');
+                  updateField('reason', '', 'reason-select');
                 } else {
-                  updateField('reason', e.target.value);
+                  updateField('reason', e.target.value, 'reason-select');
                 }
               }}
               className={`w-full h-10 px-3.5 text-xs border rounded-md font-medium shadow-2xs focus:outline-none transition-colors ${
@@ -1168,10 +1490,13 @@ export const PsuForm: React.FC<PsuFormProps> = ({
           </label>
           <textarea
             id="remarks-input"
+            name="psu_form_remarks"
             rows={3}
+            autoComplete="off"
+            data-lpignore="true"
             placeholder="Enter any remarks, special scheduling requirements, or notes (optional)..."
             value={formData.remarks}
-            onChange={(e) => updateField('remarks', e.target.value)}
+            onChange={(e) => updateField('remarks', e.target.value, 'remarks-input')}
             className="w-full p-3.5 text-xs border border-neutral-300 rounded-md bg-white text-neutral-950 placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-950 focus:border-neutral-950 resize-none font-normal shadow-2xs"
           />
         </div>
